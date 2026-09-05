@@ -3,7 +3,7 @@ name: IPQ60XX-6.12-NOWIFIV2
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 19 * * *
+    - cron: 0 19 * * *  # 每天北京时间 03:00 自动编译
 
 # 并发策略：当有新任务触发时，自动取消进行中的旧任务，节约 Action 分钟数
 concurrency:
@@ -16,196 +16,553 @@ permissions:
   actions: write
 
 env:
-  REPO_URL: https://github.com/LiBwrt/openwrt-6.x.git
-  REPO_BRANCH: main-nss
+  # ==================== 核心配置 ====================
+  # 源码仓库：LiBwrt 主仓库
+  REPO_URL: https://github.com/LiBwrt/LibWrt.git
+  # 源码分支：使用 25.12-nss 分支（包含 NSS 支持的 6.12 内核）
+  REPO_BRANCH: 25.12-nss
+  # 配置文件路径
   CONFIG_FILE: configs/ipq60xx-nowifiV2.config
+  # 自定义脚本（负责添加插件和更新版本）
   DIY_SCRIPT: libwrt.sh
-  CLASH_KERNEL: amd64
+  # 缓存工具链（加速编译）
   CACHE_TOOLCHAIN: true
+  # 是否上传 bin 目录
   UPLOAD_BIN_DIR: false
+  # 是否发布固件到 Release
   FIRMWARE_RELEASE: true
+  # 固件标签前缀
   FIRMWARE_TAG: IPQ60XX-6.12-NOWIFIV2
+  # 时区设置
   TZ: Asia/Shanghai
+  
+  # ==================== 版本控制 ====================
+  # Xray-core 最新版本（将在后续步骤中动态获取）
+  XRAY_LATEST: ""
+  # Sing-box 最新版本（将在后续步骤中动态获取）
+  SINGBOX_LATEST: ""
 
 jobs:
   Build:
     runs-on: ubuntu-22.04
-
     steps:
-    - name: Check Server Performance(检查服务器性能)
-      run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
-        echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
-        echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
-        echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
-        echo "--------------------------硬盘信息--------------------------"
-        echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+      # ============================================================
+      # 步骤 1: 检查服务器性能（可选，用于调试）
+      # ============================================================
+      - name: Check Server Performance(检查服务器性能)
+        run: |
+          echo "警告⚠"
+          echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
+          echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
+          echo "--------------------------CPU信息--------------------------"
+          echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+          echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
+          echo "--------------------------内存信息--------------------------"
+          echo "已安装内存详细信息："
+          echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
+          echo "--------------------------硬盘信息--------------------------"
+          echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
 
-    - name: Initialization Environment(初始化环境)
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        docker images -q | xargs -r docker rmi -f || true
-        sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android $AGENT_TOOLSDIRECTORY
-        sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
-        sudo -E apt-get -y update
-        sudo -E apt-get -y install $(curl -fsSL is.gd/depends_ubuntu_2204)
-        sudo -E systemctl daemon-reload
-        sudo -E apt-get -y autoremove --purge
-        sudo -E apt-get -y clean
-        sudo timedatectl set-timezone "$TZ"
+      # ============================================================
+      # 步骤 2: 初始化编译环境
+      # ============================================================
+      - name: Initialization Environment(初始化环境)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # 清理不必要的软件包，释放磁盘空间
+          docker images -q | xargs -r docker rmi -f || true
+          sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android $AGENT_TOOLSDIRECTORY
+          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
+          sudo -E apt-get -y update
+          # 安装编译依赖
+          sudo -E apt-get -y install $(curl -fsSL is.gd/depends_ubuntu_2204)
+          sudo -E systemctl daemon-reload
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get -y clean
+          sudo timedatectl set-timezone "$TZ"
 
-    - name: Combine Disks(合并磁盘)
-      uses: easimon/maximize-build-space@master
-      with:
-        swap-size-mb: 1024
-        temp-reserve-mb: 100
-        root-reserve-mb: 1024
+      # ============================================================
+      # 步骤 3: 合并磁盘空间（增加编译可用空间）
+      # ============================================================
+      - name: Combine Disks(合并磁盘)
+        uses: easimon/maximize-build-space@master
+        with:
+          # 交换分区大小（MB）
+          swap-size-mb: 1024
+          # 临时目录保留空间（MB）
+          temp-reserve-mb: 100
+          # 根目录保留空间（MB）
+          root-reserve-mb: 1024
 
-    # 升级 checkout 至 v4 稳定版
-    - name: Checkout
-      uses: actions/checkout@v4
+      # ============================================================
+      # 步骤 4: 检出当前仓库
+      # ============================================================
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Clone Source Code(克隆源代码)
-      run: |
-        df -hT $GITHUB_WORKSPACE
-        git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
-        cd openwrt
-        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-        VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
-        echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
-        VERSION_KERNEL=$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' target/linux/generic/kernel-6.12)
-        echo "VERSION_KERNEL=$VERSION_KERNEL" >> $GITHUB_ENV
-
-    - name: Generate Variables(生成变量)
-      run: |
-        cp $CONFIG_FILE $OPENWRT_PATH/.config
-        cd $OPENWRT_PATH
-        make defconfig > /dev/null 2>&1
-        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
-        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
-        DEVICE_TARGET=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
-        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
-        DEVICE_SUBTARGET=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
-        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
-
-    - name: Cache Toolchain(缓存工具链)
-      if: env.CACHE_TOOLCHAIN == 'true'
-      uses: HiGarfield/cachewrtbuild@main
-      with:
-        ccache: false
-        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
-        prefix: ${{ env.OPENWRT_PATH }}
-    
-    - name: Install Feeds(安装feeds)
-      run: |
-        cd $OPENWRT_PATH
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-  
-    - name: Load Custom Configuration(加载自定义配置)
-      # 在此步骤声明环境变量，供该步骤内运行的所有脚本使用
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        [ -e files ] && mv files $OPENWRT_PATH/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE $OPENWRT_PATH/.config
-        chmod +x $DIY_SCRIPT
-        cd $OPENWRT_PATH
-        $GITHUB_WORKSPACE/$DIY_SCRIPT
-
-    # 增加网络波动时的失败重试单线程下载机制
-    - name: Download DL Package(下载DL软件包)
-      run: |
-        cd $OPENWRT_PATH
-        make defconfig
-        make download -j8 || make download -j1 V=s
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    - name: Compile Firmware(开始编译固件)
-      id: compile
-      run: |
-        cd $OPENWRT_PATH
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
-        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
-        echo "RELEASE_TAG=${FIRMWARE_TAG}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
-
-    - name: Check Space Usage(检查空间使用情况)
-      if: (!cancelled())
-      run: df -hT
-
-    # 升级 v4，并设置 7 天自动销毁，节约仓库容量
-    - name: Upload Bin Directory(上传固件)
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.OPENWRT_PATH }}/bin
-        retention-days: 7
-
-    - name: Organize Files(整理文件)
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd $OPENWRT_PATH/bin/targets/*/*
-        cat sha256sums
-        cp $OPENWRT_PATH/.config build.config
-        tar -zcf Packages.tar.gz packages
-        rm -rf packages feeds.buildinfo version.buildinfo
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
-
-    # 升级 v4，并设置 7 天自动销毁
-    - name: Upload Firmware To Artifact(将固件上传到Artifact)
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE_PATH }}
-        retention-days: 7
-
-    - name: Upload Firmware To Release(发布固件)
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
-      uses: ncipollo/release-action@v1
-      with:
-        name: R${{ env.DATE }} for ${{ env.FIRMWARE_TAG }}
-        tag: ${{ env.RELEASE_TAG }}
-        token: ${{ secrets.GITHUB_TOKEN }}
-        artifacts: ${{ env.FIRMWARE_PATH }}/*
-        body: |
-          **This is OpenWrt Firmware for ${{ env.FIRMWARE_TAG }}**
-          ### 📒 固件信息(无WIFI)
-          - 无WIFI带有线NSS的6.12内核固件
-          - 💻 这是 ${{ env.FIRMWARE_TAG }} 平台使用的 OpenWrt 固件
-          - ⚽ 固件源码: ${{ env.REPO_URL }}
-          - 💝 源码分支: ${{ env.REPO_BRANCH }}
-          - 🌐 默认地址: 192.168.1.1
-          - 🔑 默认密码: password
-          ### 🧊 固件版本
-          - 固件内核版本：${{ env.VERSION_KERNEL }}
-          - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录
-          - ${{ env.VERSION_INFO }}
-
-    - name: Delete Old Releases(删除旧的发布)
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        releases=$(gh release list --limit 100 | grep "${FIRMWARE_TAG}-" | cut -f3)
-        count=0
-        for tag in $releases; do
-          if [ -n "$tag" ]; then
-            count=$((count+1))
-            if [ $count -gt 7 ]; then
-              echo "Deleting old release and tag: $tag"
-              gh release delete "$tag" -y --cleanup-tag
-            fi
+      # ============================================================
+      # 步骤 5: 获取 Xray-core 和 Sing-box 最新版本号
+      # ============================================================
+      - name: Get Latest Versions(获取最新版本号)
+        id: versions
+        run: |
+          echo "🔄 开始获取 Xray-core 和 Sing-box 最新版本..."
+          
+          # 获取 Xray-core 最新版本
+          XRAY_LATEST=$(curl -sL --max-time 30 \
+            "https://api.github.com/repos/XTLS/Xray-core/releases/latest" \
+            | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//' || echo "")
+          
+          # 如果 API 失败，使用 fallback
+          if [ -z "$XRAY_LATEST" ]; then
+            echo "⚠️ Xray-core API 请求失败，使用备用方案..."
+            XRAY_LATEST=$(curl -sL --max-time 30 \
+              "https://api.github.com/repos/XTLS/Xray-core/tags" \
+              | jq -r '.[0].name // empty' 2>/dev/null | sed 's/^v//' || echo "")
           fi
-        done
+          
+          # 获取 Sing-box 最新版本
+          SINGBOX_LATEST=$(curl -sL --max-time 30 \
+            "https://api.github.com/repos/SagerNet/sing-box/releases/latest" \
+            | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//' || echo "")
+          
+          # 如果 API 失败，使用 fallback
+          if [ -z "$SINGBOX_LATEST" ]; then
+            echo "⚠️ Sing-box API 请求失败，使用备用方案..."
+            SINGBOX_LATEST=$(curl -sL --max-time 30 \
+              "https://api.github.com/repos/SagerNet/sing-box/tags" \
+              | jq -r '.[0].name // empty' 2>/dev/null | sed 's/^v//' || echo "")
+          fi
+          
+          # 最终 fallback（如果所有方法都失败）
+          [ -z "$XRAY_LATEST" ] && XRAY_LATEST="26.7.28"
+          [ -z "$SINGBOX_LATEST" ] && SINGBOX_LATEST="1.14.0"
+          
+          echo "📌 Xray-core 最新版本: v$XRAY_LATEST"
+          echo "📌 Sing-box 最新版本: v$SINGBOX_LATEST"
+          
+          # 输出到 GitHub Environment
+          echo "XRAY_LATEST=$XRAY_LATEST" >> $GITHUB_ENV
+          echo "SINGBOX_LATEST=$SINGBOX_LATEST" >> $GITHUB_ENV
+          
+          # 输出到步骤输出（供后续步骤使用）
+          echo "xray_version=$XRAY_LATEST" >> $GITHUB_OUTPUT
+          echo "singbox_version=$SINGBOX_LATEST" >> $GITHUB_OUTPUT
+
+      # ============================================================
+      # 步骤 6: 克隆 OpenWrt 源码
+      # ============================================================
+      - name: Clone Source Code(克隆源代码)
+        run: |
+          df -hT $GITHUB_WORKSPACE
+          
+          echo "🔄 开始克隆 LiBwrt 源码..."
+          echo "仓库: $REPO_URL"
+          echo "分支: $REPO_BRANCH"
+          
+          # 克隆源码（浅克隆，加速）
+          git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+          
+          cd openwrt
+          
+          # 记录 OpenWrt 路径
+          echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
+          
+          # 获取源码信息
+          VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
+          echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
+          
+          # 获取内核版本
+          VERSION_KERNEL=$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' target/linux/generic/kernel-6.12 2>/dev/null || echo "6.12")
+          echo "VERSION_KERNEL=$VERSION_KERNEL" >> $GITHUB_ENV
+          
+          echo "✅ 源码克隆完成"
+          echo "📌 内核版本: $VERSION_KERNEL"
+          echo "📌 源码更新: $VERSION_INFO"
+
+      # ============================================================
+      # 步骤 7: 生成编译变量
+      # ============================================================
+      - name: Generate Variables(生成变量)
+        run: |
+          cp $CONFIG_FILE $OPENWRT_PATH/.config
+          cd $OPENWRT_PATH
+          make defconfig > /dev/null 2>&1
+          
+          SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}' | sed 's/\.git//')"
+          echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
+          
+          DEVICE_TARGET=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
+          echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
+          
+          DEVICE_SUBTARGET=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
+          echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+          
+          echo "✅ 编译变量已生成"
+          echo "📌 设备目标: $DEVICE_TARGET/$DEVICE_SUBTARGET"
+
+      # ============================================================
+      # 步骤 8: 缓存工具链（加速编译）
+      # ============================================================
+      - name: Cache Toolchain(缓存工具链)
+        if: env.CACHE_TOOLCHAIN == 'true'
+        uses: HiGarfield/cachewrtbuild@main
+        with:
+          # 不使用 ccache
+          ccache: false
+          # 缓存键：仓库-分支-目标平台
+          mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+          # OpenWrt 路径前缀
+          prefix: ${{ env.OPENWRT_PATH }}
+
+      # ============================================================
+      # 步骤 9: 安装 Feeds（仅更新，不安装）
+      # ============================================================
+      - name: Install Feeds(安装feeds)
+        run: |
+          cd $OPENWRT_PATH
+          
+          echo "🔄 更新 Feeds..."
+          ./scripts/feeds update -a
+          
+          echo "✅ Feeds 更新完成"
+          
+          # 注意：不在这里执行 install -a，让 libwrt.sh 完全控制包安装
+          # 避免双重安装导致的版本冲突
+
+      # ============================================================
+      # 步骤 10: 加载自定义配置并运行 libwrt.sh
+      # ============================================================
+      - name: Load Custom Configuration(加载自定义配置)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 复制自定义文件
+          [ -e files ] && mv files $OPENWRT_PATH/files
+          [ -e $CONFIG_FILE ] && cp $CONFIG_FILE $OPENWRT_PATH/.config
+          
+          # 确保脚本有执行权限
+          chmod +x $DIY_SCRIPT
+          
+          cd $OPENWRT_PATH
+          
+          echo "🔄 开始运行自定义脚本: $DIY_SCRIPT"
+          echo "📌 当前工作目录: $PWD"
+          echo "📌 GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+          
+          # 运行自定义脚本（负责添加插件、更新版本等）
+          $GITHUB_WORKSPACE/$DIY_SCRIPT
+          
+          echo "✅ 自定义脚本执行完成"
+
+      # ============================================================
+      # 步骤 11: 验证 Xray 和 Sing-box 版本（关键步骤！）
+      # ============================================================
+      - name: Verify Component Versions(验证组件版本)
+        run: |
+          cd $OPENWRT_PATH
+          
+          echo "🔍 验证 Xray-core 和 Sing-box 版本..."
+          
+          # 查找 Xray-core Makefile
+          XRAY_MK=$(find package -path "*xray-core/Makefile" -o -path "*Xray-core/Makefile" 2>/dev/null | head -n 1)
+          
+          # 查找 Sing-box Makefile
+          SB_MK=$(find package -path "*sing-box/Makefile" -o -path "*Sing-box/Makefile" 2>/dev/null | head -n 1)
+          
+          echo "Xray Makefile: $XRAY_MK"
+          echo "Sing-box Makefile: $SB_MK"
+          
+          # 验证 Xray 版本
+          if [ -n "$XRAY_MK" ] && [ -f "$XRAY_MK" ]; then
+            XRAY_ACTUAL=$(grep "^PKG_VERSION" "$XRAY_MK" 2>/dev/null | head -n 1 | awk -F ':=' '{print $2}' | tr -d ' ')
+            echo "📌 Xray-core 实际版本: $XRAY_ACTUAL"
+            echo "📌 Xray-core 期望版本: $XRAY_LATEST"
+            
+            if [ "$XRAY_ACTUAL" != "$XRAY_LATEST" ]; then
+              echo "❌ 错误：Xray-core 版本不匹配！"
+              echo "   期望: $XRAY_LATEST"
+              echo "   实际: $XRAY_ACTUAL"
+              echo "   Makefile: $XRAY_MK"
+              
+              # 尝试手动修复
+              echo "🔄 尝试手动修复 Xray-core 版本..."
+              sed -i "s/^PKG_VERSION[[:space:]]*:=.*/PKG_VERSION:=$XRAY_LATEST/" "$XRAY_MK"
+              
+              # 验证修复是否成功
+              XRAY_CHECK=$(grep "^PKG_VERSION" "$XRAY_MK" | head -n 1 | awk -F ':=' '{print $2}' | tr -d ' ')
+              if [ "$XRAY_CHECK" != "$XRAY_LATEST" ]; then
+                echo "❌ 修复失败！"
+                exit 1
+              else
+                echo "✅ Xray-core 版本已修复"
+              fi
+            else
+              echo "✅ Xray-core 版本正确: $XRAY_LATEST"
+            fi
+          else
+            echo "❌ 错误：未找到 Xray-core Makefile"
+            find package -name "Makefile" -path "*xray*" -o -name "Makefile" -path "*Xray*"
+            exit 1
+          fi
+          
+          # 验证 Sing-box 版本
+          if [ -n "$SB_MK" ] && [ -f "$SB_MK" ]; then
+            SB_ACTUAL=$(grep "^PKG_VERSION" "$SB_MK" 2>/dev/null | head -n 1 | awk -F ':=' '{print $2}' | tr -d ' ')
+            echo "📌 Sing-box 实际版本: $SB_ACTUAL"
+            echo "📌 Sing-box 期望版本: $SINGBOX_LATEST"
+            
+            if [ "$SB_ACTUAL" != "$SINGBOX_LATEST" ]; then
+              echo "❌ 错误：Sing-box 版本不匹配！"
+              echo "   期望: $SINGBOX_LATEST"
+              echo "   实际: $SB_ACTUAL"
+              echo "   Makefile: $SB_MK"
+              
+              # 尝试手动修复
+              echo "🔄 尝试手动修复 Sing-box 版本..."
+              sed -i "s/^PKG_VERSION[[:space:]]*:=.*/PKG_VERSION:=$SINGBOX_LATEST/" "$SB_MK"
+              
+              # 验证修复是否成功
+              SB_CHECK=$(grep "^PKG_VERSION" "$SB_MK" | head -n 1 | awk -F ':=' '{print $2}' | tr -d ' ')
+              if [ "$SB_CHECK" != "$SINGBOX_LATEST" ]; then
+                echo "❌ 修复失败！"
+                exit 1
+              else
+                echo "✅ Sing-box 版本已修复"
+              fi
+            else
+              echo "✅ Sing-box 版本正确: $SINGBOX_LATEST"
+            fi
+          else
+            echo "❌ 错误：未找到 Sing-box Makefile"
+            find package -name "Makefile" -path "*sing-box*" -o -name "Makefile" -path "*Sing-box*"
+            exit 1
+          fi
+          
+          # 最终确认
+          echo ""
+          echo "==================== 版本验证结果 ===================="
+          echo "Xray-core: $(grep '^PKG_VERSION' package/*/xray-core/Makefile 2>/dev/null | head -n 1 | awk -F ':=' '{print $2}' || echo $XRAY_LATEST)"
+          echo "Sing-box: $(grep '^PKG_VERSION' package/*/sing-box/Makefile 2>/dev/null | head -n 1 | awk -F ':=' '{print $2}' || echo $SINGBOX_LATEST)"
+          echo "======================================================"
+
+      # ============================================================
+      # 步骤 12: 安装 Feeds（在 libwrt.sh 之后，只安装必要的包）
+      # ============================================================
+      - name: Install Packages After Custom Script(安装自定义包)
+        run: |
+          cd $OPENWRT_PATH
+          
+          echo "🔄 安装自定义添加的包..."
+          
+          # 只重新安装 libwrt.sh 中添加的包，避免覆盖版本更新
+          ./scripts/feeds install -a
+          
+          echo "✅ 包安装完成"
+
+      # ============================================================
+      # 步骤 13: 下载 DL 软件包（带重试机制）
+      # ============================================================
+      - name: Download DL Package(下载DL软件包)
+        run: |
+          cd $OPENWRT_PATH
+          make defconfig
+          
+          echo "🔄 开始下载 DL 软件包..."
+          
+          # 尝试多线程下载，失败则降级为单线程详细输出
+          make download -j8 || make download -j1 V=s
+          
+          # 检查下载的文件大小，移除空文件
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+          
+          echo "✅ DL 软件包下载完成"
+
+      # ============================================================
+      # 步骤 14: 编译固件
+      # ============================================================
+      - name: Compile Firmware(开始编译固件)
+        id: compile
+        run: |
+          cd $OPENWRT_PATH
+          
+          echo "🚀 开始编译固件..."
+          echo "编译线程数: $(nproc)"
+          
+          # 显示当前配置摘要
+          echo "==================== 编译配置 ===================="
+          grep "CONFIG_PACKAGE" .config | head -n 50
+          echo "=================================================="
+          
+          # 编译（多线程，失败则降级）
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          
+          # 检查编译结果
+          if [ $? -eq 0 ]; then
+            echo "✅ 编译成功"
+            echo "status=success" >> $GITHUB_OUTPUT
+            
+            # 记录编译时间和日期
+            echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+            echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+            
+            # 生成发布标签
+            echo "RELEASE_TAG=${FIRMWARE_TAG}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
+            
+          else
+            echo "❌ 编译失败"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # ============================================================
+      # 步骤 15: 检查磁盘使用情况
+      # ============================================================
+      - name: Check Space Usage(检查空间使用情况)
+        if: (!cancelled())
+        run: |
+          df -hT
+          echo ""
+          du -sh $OPENWRT_PATH/bin 2>/dev/null || echo "bin 目录不存在"
+
+      # ============================================================
+      # 步骤 16: 上传 bin 目录（可选）
+      # ============================================================
+      - name: Upload Bin Directory(上传固件)
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
+          path: ${{ env.OPENWRT_PATH }}/bin
+          retention-days: 7
+
+      # ============================================================
+      # 步骤 17: 整理固件文件
+      # ============================================================
+      - name: Organize Files(整理文件)
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd $OPENWRT_PATH/bin/targets/*/*
+          
+          echo "📁 固件文件列表:"
+          ls -la
+          
+          # 显示校验和
+          cat sha256sums 2>/dev/null || echo "无校验和文件"
+          
+          # 复制编译配置供发布使用
+          cp $OPENWRT_PATH/.config build.config
+          
+          # 打包 Packages 目录
+          tar -zcf Packages.tar.gz packages
+          
+          # 清理不必要的文件
+          rm -rf packages feeds.buildinfo version.buildinfo
+          
+          # 记录固件路径
+          echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+
+      # ============================================================
+      # 步骤 18: 上传固件到 Artifact（如果未发布到 Release）
+      # ============================================================
+      - name: Upload Firmware To Artifact(将固件上传到Artifact)
+        if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE_PATH }}
+          retention-days: 7
+
+      # ============================================================
+      # 步骤 19: 发布固件到 GitHub Release
+      # ============================================================
+      - name: Upload Firmware To Release(发布固件)
+        if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
+        uses: ncipollo/release-action@v1
+        with:
+          name: R${{ env.DATE }} for ${{ env.FIRMWARE_TAG }}
+          tag: ${{ env.RELEASE_TAG }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ env.FIRMWARE_PATH }}/*
+          body: |
+            **This is OpenWrt Firmware for ${{ env.FIRMWARE_TAG }}**
+            
+            ### 📒 固件信息(无WIFI)
+            - 无WIFI带有线NSS的6.12内核固件
+            - 💻 这是 ${{ env.FIRMWARE_TAG }} 平台使用的 OpenWrt 固件
+            - ⚽ 固件源码: ${{ env.REPO_URL }}
+            - 💝 源码分支: ${{ env.REPO_BRANCH }}
+            - 🌐 默认地址: 192.168.1.1
+            - 🔑 默认密码: password
+            
+            ### 🧊 固件版本
+            - 固件内核版本：${{ env.VERSION_KERNEL }}
+            - Xray-core 版本：v${{ env.XRAY_LATEST }}
+            - Sing-box 版本：v${{ env.SINGBOX_LATEST }}
+            
+            ### 📦 已集成插件
+            - Passwall (最新版本)
+            - Xray-core v${{ env.XRAY_LATEST }}
+            - Sing-box v${{ env.SINGBOX_LATEST }}
+            - OpenClash
+            - SmartDNS
+            - MosDNS
+            - Alist
+            
+            ### 🔄 更新说明
+            - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录
+            - ${{ env.VERSION_INFO }}
+            
+            ### ⚠️ 注意事项
+            - 本固件为无WiFi版本，适合作为有线路由/旁路网关使用
+            - 默认管理IP: 192.168.1.1
+            - 默认密码: password
+            - 首次刷机请使用 factory.ubi 文件
+            - 系统升级请使用 sysupgrade.bin 文件
+
+      # ============================================================
+      # 步骤 20: 删除旧的 Release（保持仓库整洁）
+      # ============================================================
+      - name: Delete Old Releases(删除旧的发布)
+        if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🗑️ 开始清理旧的 Release..."
+          
+          # 获取所有匹配的 release
+          releases=$(gh release list --limit 100 | grep "${FIRMWARE_TAG}-" | cut -f3)
+          
+          count=0
+          for tag in $releases; do
+            if [ -n "$tag" ]; then
+              count=$((count+1))
+              # 只保留最新的 7 个 release
+              if [ $count -gt 7 ]; then
+                echo "删除旧 Release: $tag"
+                gh release delete "$tag" -y --cleanup-tag
+              fi
+            fi
+          done
+          
+          echo "✅ Release 清理完成"
+
+      # ============================================================
+      # 步骤 21: 编译失败通知（可选）
+      # ============================================================
+      - name: Notification On Failure(编译失败通知)
+        if: failure()
+        run: |
+          echo "❌ 编译失败！"
+          echo "失败时间: $(date)"
+          echo "分支: $REPO_BRANCH"
+          echo "Xray 版本: $XRAY_LATEST"
+          echo "Sing-box 版本: $SINGBOX_LATEST"
+          
+          # 这里可以添加邮件、Telegram 等通知
+          # 例如：
+          # curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          #   -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          #   -d text="❌ OpenWrt 编译失败！分支: $REPO_BRANCH, 时间: $(date)"
