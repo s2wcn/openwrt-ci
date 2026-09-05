@@ -34,9 +34,9 @@ function git_sparse_clone() {
 
 # 科学上网插件
 git clone --depth=1 -b main https://github.com/fw876/helloworld package/luci-app-ssr-plus
-git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall-packages package/openwrt-passwall
-git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall package/luci-app-passwall
-git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall2 package/luci-app-passwall2
+git clone --depth=1 -b main https://github.com/Openwrt-Passwall/openwrt-passwall-packages package/openwrt-passwall-packages
+git clone --depth=1 -b main https://github.com/Openwrt-Passwall/openwrt-passwall package/luci-app-passwall
+git clone --depth=1 -b main https://github.com/Openwrt-Passwall/openwrt-passwall2 package/luci-app-passwall2
 git_sparse_clone master https://github.com/vernesong/OpenClash luci-app-openclash
 
 # Themes
@@ -106,15 +106,17 @@ find package/*/ -maxdepth 2 -path "*/Makefile" | xargs -I {} sed -i 's/PKG_SOURC
 # ==========================================
 echo "开始更新 Xray-core..."
 # 抓取 Xray 最新 release 的版本号
-XRAY_VER=$(curl -sL "https://api.github.com/repos/XTLS/Xray-core/releases/latest" | awk -F '"' '/tag_name/{print $4}' | sed 's/v//g')
+XRAY_VER=$(curl -sL "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*' | head -1 | cut -d'"' -f4 | sed 's/v//g')
 # 查找 xray-core 的 Makefile 路径
-XRAY_MK=$(find package feeds -maxdepth 4 -type f -wholename "*/xray-core/Makefile" | head -n 1)
+XRAY_MK=$(find package feeds -maxdepth 4 -type f -wholename "*/xray-core/Makefile" 2>/dev/null | head -n 1)
 if [ -n "$XRAY_MK" ] && [ -n "$XRAY_VER" ]; then
     echo "找到 Xray-core Makefile: $XRAY_MK，准备更新至 $XRAY_VER"
     # 替换版本号
     sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=$XRAY_VER/g" "$XRAY_MK"
     # 将哈希校验设置为 skip
     sed -i "s/PKG_HASH:=.*/PKG_HASH:=skip/g" "$XRAY_MK"
+else
+    echo "警告：未找到 Xray-core 的 Makefile 或无法获取最新版本"
 fi
 
 # ==========================================
@@ -122,24 +124,34 @@ fi
 # ==========================================
 echo "开始更新 Sing-box..."
 # 抓取 Sing-box 最新 release 的版本号 (去除前缀 v)
-SB_VER=$(curl -sL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | awk -F '"' '/tag_name/{print $4}' | sed 's/v//g')
-SB_MK=$(find package feeds -maxdepth 4 -type f -wholename "*/sing-box/Makefile" | head -n 1)
+SB_VER=$(curl -sL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*' | head -1 | cut -d'"' -f4 | sed 's/v//g')
+SB_MK=$(find package feeds -maxdepth 4 -type f -wholename "*/sing-box/Makefile" 2>/dev/null | head -n 1)
 if [ -n "$SB_MK" ] && [ -n "$SB_VER" ]; then
     echo "找到 Sing-box Makefile: $SB_MK，准备更新至 $SB_VER"
     # 替换版本号
     sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=$SB_VER/g" "$SB_MK"
     # 跳过哈希校验
     sed -i "s/PKG_HASH:=.*/PKG_HASH:=skip/g" "$SB_MK"
+else
+    echo "警告：未找到 Sing-box 的 Makefile 或无法获取最新版本"
 fi
 
-UPDATE_PACKAGE "passwall-packages" "Openwrt-Passwall/openwrt-passwall-packages" "main"
-UPDATE_PACKAGE "passwall" "Openwrt-Passwall/openwrt-passwall" "main" "pkg"
-
-
-UPDATE_VERSION "sing-box"
-UPDATE_VERSION "tailscale"
-UPDATE_VERSION "xray-core"
-
+# ==========================================
+# 自动更新 Tailscale 为 GitHub 最新版本
+# ==========================================
+echo "开始更新 Tailscale..."
+# 抓取 Tailscale 最新 release 的版本号
+TS_VER=$(curl -sL "https://api.github.com/repos/tailscale/tailscale/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*' | head -1 | cut -d'"' -f4 | sed 's/v//g')
+TS_MK=$(find package feeds -maxdepth 4 -type f -wholename "*/tailscale/Makefile" 2>/dev/null | head -n 1)
+if [ -n "$TS_MK" ] && [ -n "$TS_VER" ]; then
+    echo "找到 Tailscale Makefile: $TS_MK，准备更新至 $TS_VER"
+    # 替换版本号
+    sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=$TS_VER/g" "$TS_MK"
+    # 跳过哈希校验
+    sed -i "s/PKG_HASH:=.*/PKG_HASH:=skip/g" "$TS_MK"
+else
+    echo "警告：未找到 Tailscale 的 Makefile 或无法获取最新版本"
+fi
 
 # ==========================================
 # 更新和安装 feeds（必须放在版本修改之后）
