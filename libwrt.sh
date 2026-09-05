@@ -141,5 +141,10 @@ UPDATE_VERSION "tailscale"
 UPDATE_VERSION "xray-core"
 
 
-# 移除冗余的 update -a，直接 install，节省编译时间和防止网络错误
+# ==========================================
+# 更新和安装 feeds（必须放在版本修改之后）
+# ==========================================
+echo "更新 feeds..."
+./scripts/feeds update -a
+echo "安装 feeds..."
 ./scripts/feeds install -a
