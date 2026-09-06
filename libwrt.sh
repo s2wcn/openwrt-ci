@@ -20,8 +20,17 @@ set -euo pipefail
 PW_REF="${PW_REF:-main}"
 TRACK_LATEST="${TRACK_LATEST:-0}"
 
-PKG_LUCI="package/luci-app-passwall"            # Passwall LuCI 应用
-PKG_CORE="package/openwrt-passwall-packages"    # Passwall 依赖组件集合
+# 路径约定：
+#   openwrt-passwall         根/luci-app-passwall/        （嵌套！）
+#   openwrt-passwall2        根/luci-app-passwall2/       （嵌套！）
+#   openwrt-passwall-packages 根/<component>/              （平铺）
+# 因此读写 LuCI 端的 Makefile 时必须再进一层子目录。
+PKG_LUCI_DIR="package/luci-app-passwall"               # 克隆目标
+PKG_LUCI_MK="package/luci-app-passwall/luci-app-passwall/Makefile"
+PKG_LUCI2_DIR="package/luci-app-passwall2"
+PKG_LUCI2_MK="package/luci-app-passwall2/luci-app-passwall2/Makefile"
+PKG_CORE="package/openwrt-passwall-packages"          # 平铺结构，直接用 <PKG_CORE>/<pkg>/Makefile
+PKG_CORE_DEFAULT_BRANCH="xray-core"                    # 用于检测克隆是否完整
 
 log()  { echo "::notice::$*"; }
 warn() { echo "::warning::$*"; }
@@ -30,6 +39,11 @@ die()  { echo "::error::$*"; exit 1; }
 # 必须在 OpenWrt 源码根目录运行
 [ -f scripts/feeds ] || die "请在 OpenWrt 源码根目录运行本脚本（未找到 scripts/feeds）"
 [ -f .config ]       || die "未找到 .config，请先拷贝编译配置"
+
+# 每次重启都重新克隆（防止上一次半截残留）
+[ -d "$PKG_LUCI_DIR" ]  && rm -rf "$PKG_LUCI_DIR"
+[ -d "$PKG_LUCI2_DIR" ] && rm -rf "$PKG_LUCI2_DIR"
+[ -d "$PKG_CORE" ]      && rm -rf "$PKG_CORE"
 
 # ------------------------------------------------------------------------------
 # 工具函数
@@ -139,12 +153,22 @@ rm -rf feeds/luci/applications/{luci-app-mosdns,luci-app-netdata}
 # 2. 克隆 Passwall（主仓库 + 依赖组件集合）
 # ------------------------------------------------------------------------------
 log "克隆 Passwall 组件（ref=${PW_REF}）..."
-git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall-packages "$PKG_CORE"
-git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall         "$PKG_LUCI"
+git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall-packages "$PKG_CORE" \
+  || die "克隆 $PKG_CORE 失败"
+[ -d "${PKG_CORE}/${PKG_CORE_DEFAULT_BRANCH}" ] \
+  || die "$PKG_CORE/${PKG_CORE_DEFAULT_BRANCH} 不存在，克隆可能不完整（请检查分支 ${PW_REF} 是否存在）"
+
+git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall "$PKG_LUCI_DIR" \
+  || die "克隆 $PKG_LUCI_DIR 失败"
+[ -f "$PKG_LUCI_MK" ] \
+  || die "未找到 $PKG_LUCI_MK（上游 openwrt-passwall 的目录结构可能又改了，请到 https://github.com/Openwrt-Passwall/openwrt-passwall 核对）"
 
 # 只有配置里启用了 passwall2 才克隆
 if config_enabled luci-app-passwall2; then
-  git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall2 package/luci-app-passwall2
+  git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall2 "$PKG_LUCI2_DIR" \
+    || die "克隆 $PKG_LUCI2_DIR 失败"
+  [ -f "$PKG_LUCI2_MK" ] \
+    || die "未找到 $PKG_LUCI2_MK（上游 openwrt-passwall2 的目录结构可能又改了）"
 fi
 
 # ------------------------------------------------------------------------------
@@ -185,10 +209,11 @@ fi
 # ------------------------------------------------------------------------------
 XRAY_VER="$(pkg_version "${PKG_CORE}/xray-core/Makefile")"
 SB_VER="$(pkg_version "${PKG_CORE}/sing-box/Makefile")"
-PW_VER="$(pkg_version "${PKG_LUCI}/Makefile")"
+PW_VER="$(pkg_version "$PKG_LUCI_MK")"
 
 [ -n "$XRAY_VER" ] || die "未能读取 xray-core 版本"
 [ -n "$SB_VER" ]   || die "未能读取 sing-box 版本"
+[ -n "$PW_VER" ]   || die "未能读取 luci-app-passwall 版本（Makefile: $PKG_LUCI_MK）"
 
 # 配置与脚本一致性校验：声明要用的必须真的启用
 for p in luci-app-passwall; do
