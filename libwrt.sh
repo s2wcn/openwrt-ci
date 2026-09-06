@@ -21,15 +21,17 @@ PW_REF="${PW_REF:-main}"
 TRACK_LATEST="${TRACK_LATEST:-0}"
 
 # 路径约定：
-#   openwrt-passwall         根/luci-app-passwall/        （嵌套！）
-#   openwrt-passwall2        根/luci-app-passwall2/       （嵌套！）
-#   openwrt-passwall-packages 根/<component>/              （平铺）
-# 因此读写 LuCI 端的 Makefile 时必须再进一层子目录。
-PKG_LUCI_DIR="package/luci-app-passwall"               # 克隆目标
-PKG_LUCI_MK="package/luci-app-passwall/luci-app-passwall/Makefile"
+#   openwrt-passwall         根/luci-app-passwall/        （上游嵌套）
+#   openwrt-passwall2        根/luci-app-passwall2/       （上游嵌套）
+#   openwrt-passwall-packages 根/<component>/             （上游平铺）
+# 解决方案：用 tmp 克隆 + mv 拍平，让 OpenWrt 与下游重复检测都看到扁平结构。
+PKG_LUCI_DIR="package/luci-app-passwall"               # 拍平后的最终位置（=第一层）
+PKG_LUCI_MK="package/luci-app-passwall/Makefile"
+PKG_LUCI_TMP="package/.luci-app-passwall.tmp"          # 临时克隆位置（不进入扫描）
 PKG_LUCI2_DIR="package/luci-app-passwall2"
-PKG_LUCI2_MK="package/luci-app-passwall2/luci-app-passwall2/Makefile"
-PKG_CORE="package/openwrt-passwall-packages"          # 平铺结构，直接用 <PKG_CORE>/<pkg>/Makefile
+PKG_LUCI2_MK="package/luci-app-passwall2/Makefile"
+PKG_LUCI2_TMP="package/.luci-app-passwall2.tmp"
+PKG_CORE="package/openwrt-passwall-packages"           # 平铺结构
 PKG_CORE_DEFAULT_BRANCH="xray-core"                    # 用于检测克隆是否完整
 
 log()  { echo "::notice::$*"; }
@@ -41,9 +43,11 @@ die()  { echo "::error::$*"; exit 1; }
 [ -f .config ]       || die "未找到 .config，请先拷贝编译配置"
 
 # 每次重启都重新克隆（防止上一次半截残留）
-[ -d "$PKG_LUCI_DIR" ]  && rm -rf "$PKG_LUCI_DIR"
-[ -d "$PKG_LUCI2_DIR" ] && rm -rf "$PKG_LUCI2_DIR"
-[ -d "$PKG_CORE" ]      && rm -rf "$PKG_CORE"
+[ -d "$PKG_LUCI_DIR" ]   && rm -rf "$PKG_LUCI_DIR"
+[ -d "$PKG_LUCI_TMP" ]   && rm -rf "$PKG_LUCI_TMP"
+[ -d "$PKG_LUCI2_DIR" ]  && rm -rf "$PKG_LUCI2_DIR"
+[ -d "$PKG_LUCI2_TMP" ]  && rm -rf "$PKG_LUCI2_TMP"
+[ -d "$PKG_CORE" ]       && rm -rf "$PKG_CORE"
 
 # ------------------------------------------------------------------------------
 # 工具函数
@@ -137,17 +141,22 @@ git_sparse_clone() {
 }
 
 # ------------------------------------------------------------------------------
-# 1. 消除重复来源：Passwall 克隆包会与 immortalwrt feed 中的同名包冲突
-#    （immortalwrt@openwrt-25.12 的 sing-box 仍是 1.12.25，落后两个小版本）
+# 1. 消除重复来源：仅当本脚本后续会克隆替代包时，才删 feed 侧的副本
+#    （immortalwrt@openwrt-25.12 的 sing-box 仍为 1.12.25，落后两个小版本）
+#    注意：uhttpd 等核心 feed 不动；只删本脚本自带替代品的那些包。
 # ------------------------------------------------------------------------------
-log "清理 feeds 中与 Passwall 重复的包来源..."
+log "清理 feeds 中与 Passwall 重复的包来源（仅限有替代品的包）..."
+
+# Passwall 主仓 + 组件仓自带替代品的删 feed
 rm -rf feeds/packages/net/{xray-core,sing-box,xray-plugin,chinadns-ng,dns2socks,geoview,ipt2socks,microsocks,naiveproxy,shadow-tls,shadowsocks-rust,shadowsocksr-libev,simple-obfs,tcping,v2ray-geodata,v2ray-plugin,hysteria}
+
+# luci-app-passwall 由本脚本的步骤 2 克隆（拍平后写入 package/luci-app-passwall/Makefile）
 rm -rf feeds/luci/applications/luci-app-passwall
 
-# 保留原有的清理项（修正 appations -> applications 拼写错误）
-rm -rf feeds/packages/net/{mosdns,msd_lite,smartdns}
-rm -rf feeds/luci/themes/luci-theme-argon
-rm -rf feeds/luci/applications/{luci-app-mosdns,luci-app-netdata}
+# 仅当用户启用 passwall2 时才动 luci-app-passwall2（避免误删未启用的可用包）
+if config_enabled luci-app-passwall2; then
+  rm -rf feeds/luci/applications/luci-app-passwall2
+fi
 
 # ------------------------------------------------------------------------------
 # 2. 克隆 Passwall（主仓库 + 依赖组件集合）
@@ -158,28 +167,40 @@ git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-pas
 [ -d "${PKG_CORE}/${PKG_CORE_DEFAULT_BRANCH}" ] \
   || die "$PKG_CORE/${PKG_CORE_DEFAULT_BRANCH} 不存在，克隆可能不完整（请检查分支 ${PW_REF} 是否存在）"
 
-git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall "$PKG_LUCI_DIR" \
-  || die "克隆 $PKG_LUCI_DIR 失败"
+# 克隆到临时目录（以 . 开头避免被 OpenWrt 扫描到），再 mv 内层子目录到最终位置——拍平嵌套结构
+git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall "$PKG_LUCI_TMP" \
+  || die "克隆 $PKG_LUCI_TMP 失败"
+[ -d "${PKG_LUCI_TMP}/luci-app-passwall" ] \
+  || die "未找到 ${PKG_LUCI_TMP}/luci-app-passwall（上游 openwrt-passwall 目录结构可能又改了，请到 https://github.com/Openwrt-Passwall/openwrt-passwall 核对）"
+mv "${PKG_LUCI_TMP}/luci-app-passwall" "$PKG_LUCI_DIR" || die "mv 失败"
+rm -rf "$PKG_LUCI_TMP"
 [ -f "$PKG_LUCI_MK" ] \
-  || die "未找到 $PKG_LUCI_MK（上游 openwrt-passwall 的目录结构可能又改了，请到 https://github.com/Openwrt-Passwall/openwrt-passwall 核对）"
+  || die "未找到 $PKG_LUCI_MK（拍平后 Makefile 缺失，请检查上游包结构）"
 
 # 只有配置里启用了 passwall2 才克隆
 if config_enabled luci-app-passwall2; then
-  git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall2 "$PKG_LUCI2_DIR" \
-    || die "克隆 $PKG_LUCI2_DIR 失败"
+  git clone --depth 1 -b "$PW_REF" https://github.com/Openwrt-Passwall/openwrt-passwall2 "$PKG_LUCI2_TMP" \
+    || die "克隆 $PKG_LUCI2_TMP 失败"
+  [ -d "${PKG_LUCI2_TMP}/luci-app-passwall2" ] \
+    || die "未找到 ${PKG_LUCI2_TMP}/luci-app-passwall2（上游 openwrt-passwall2 目录结构可能又改了）"
+  mv "${PKG_LUCI2_TMP}/luci-app-passwall2" "$PKG_LUCI2_DIR" || die "mv 失败"
+  rm -rf "$PKG_LUCI2_TMP"
   [ -f "$PKG_LUCI2_MK" ] \
-    || die "未找到 $PKG_LUCI2_MK（上游 openwrt-passwall2 的目录结构可能又改了）"
+    || die "未找到 $PKG_LUCI2_MK"
 fi
 
 # ------------------------------------------------------------------------------
 # 3. 可选插件：仅当 .config 中真正启用时才克隆
+#    注意：克隆前要删 feed 侧的同名包，否则 immortalwrt 默认版本会被优先选中
 # ------------------------------------------------------------------------------
 if config_enabled luci-app-openclash; then
+  rm -rf feeds/luci/applications/luci-app-openclash
   log "克隆 OpenClash..."
   git_sparse_clone main https://github.com/vernesong/OpenClash luci-app-openclash
 fi
 
 if config_enabled luci-app-smartdns || config_enabled smartdns; then
+  rm -rf feeds/packages/net/smartdns feeds/luci/applications/luci-app-smartdns
   log "克隆 SmartDNS..."
   git clone --depth 1 -b lede https://github.com/pymumu/luci-app-smartdns package/luci-app-smartdns
   git clone --depth 1 https://github.com/pymumu/openwrt-smartdns package/smartdns
