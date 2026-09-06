@@ -5,22 +5,23 @@ on:
   schedule:
     - cron: 0 3 * * *
 
+# 只需删除工作流运行记录与 Release，遵循最小权限
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   Cleaning:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
-    - name: Delete Old Workflows
-      uses: Mattraks/delete-workflow-runs@main
+    - name: Delete Old Workflow Runs(删除旧的工作流记录)
+      # 原 dev-drprasad/delete-older-releases 仓库已 archived（最后推送 2024-07-13），
+      # 仅保留工作流记录清理这一项；Release 清理统一交给主工作流的 Delete Old Releases 步骤，
+      # 保留数量以主工作流 env.KEEP_RELEASES 为唯一真相源。
+      uses: Mattraks/delete-workflow-runs@0cf693bc9909e5e867ee8f27b813224ba862939c # main
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         retain_days: 2
         keep_minimum_runs: 0
-
-    - name: Delete Old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      with:
-        keep_latest: 15
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
