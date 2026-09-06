@@ -154,8 +154,10 @@ jobs:
           make defconfig
 
           # 重复来源会导致"编的是哪一份"不可控（immortalwrt 的 sing-box 落后两个小版本）
+          # 用 "*/<pkg>/Makefile" 而非 -name "$p" 找目录，避免把外层包装目录误报为重复源
           for p in xray-core sing-box luci-app-passwall xray-plugin chinadns-ng; do
-            found=$(find package -type d -name "$p" -not -path "*/build_dir/*" | sort)
+            found=$(find package -type f -name Makefile -path "*/$p/Makefile" \
+                    -not -path "*/build_dir/*" -not -path "*/.git/*" 2>/dev/null | sort)
             count=$(printf '%s' "$found" | grep -c . || true)
             echo "$p 来源($count)："; echo "$found"
             [ "$count" -le 1 ] || { echo "::error::存在重复包来源 $p，请在 libwrt.sh 中移除 feed 侧副本"; exit 1; }
@@ -182,6 +184,8 @@ jobs:
           grep "CONFIG_PACKAGE" .config | head -n 50
           echo "=================================================="
 
+          # 先把当前 config 备份一份（失败诊断用）
+          cp .config config-on-failure.txt
           set +e
           make -j"$(nproc)" 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
@@ -194,9 +198,24 @@ jobs:
 
           if [ "$rc" -ne 0 ]; then
             echo "status=failed" >> $GITHUB_OUTPUT
-            cp .config "$OPENWRT_PATH/config-on-failure.txt"
             exit 1
           fi
+
+          # 关键校验：make 返回 0 ≠ 真的编出固件（缓存命中、被中断、pkg 静默失败都会骗过 $?）
+          # 这里再做一次"产物存在性"断言，确保下游步骤拿到的是真固件
+          BIN_DIR=$(ls -d bin/targets/*/*/ 2>/dev/null | head -1 || true)
+          if [ -z "$BIN_DIR" ] || ! ls "$BIN_DIR"/*factory*.bin "$BIN_DIR"/*sysupgrade*.bin \
+                                       "$BIN_DIR"/*squashfs*.bin "$BIN_DIR"/*.img.gz 2>/dev/null \
+                                  | grep -q .; then
+            echo "::error::make 返回 0 但 bin/targets/*/* 下没有找到任何固件镜像"
+            echo "::error::这是典型的'假成功'，可能原因：缓存未失效、feeds 没装齐、单包编译失败被静默吞掉"
+            echo "============ bin 目录实际清单 ============"
+            find bin -type f 2>/dev/null | head -50 || echo "（bin 目录也不存在）"
+            echo "========================================="
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "✅ 固件产物校验通过: $BIN_DIR"
 
           echo "status=success" >> $GITHUB_OUTPUT
           echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
@@ -237,13 +256,25 @@ jobs:
           retention-days: 7
 
       # ============================================================
-      # 15. 整理固件文件
+      # 15. 整理固件文件（防御式 cd：找不到目标目录时打印诊断而不是糊脸报 No such file）
       # ============================================================
       - name: Organize Files(整理文件)
         if: steps.compile.outputs.status == 'success'
         run: |
-          cd "$OPENWRT_PATH/bin/targets/*/*"
+          # 解析真实的 bin 目录（不用 glob 展开失败）
+          BIN_DIR=$(ls -d "$OPENWRT_PATH"/bin/targets/*/*/ 2>/dev/null | head -1 || true)
+          if [ -z "$BIN_DIR" ]; then
+            echo "::error::找不到固件目录 bin/targets/<target>/<subtarget>/"
+            echo "::error::通常意味着编译步骤因 make 静默失败而无产物。请查看 build.log"
+            echo "============ bin 实际内容 ============"
+            find "$OPENWRT_PATH/bin" -type f 2>/dev/null | head -50 || echo "(无)"
+            echo "===================================="
+            exit 1
+          fi
+          cd "$BIN_DIR"
+          echo "📁 固件目录: $BIN_DIR"
           ls -la
+
           cat sha256sums 2>/dev/null || echo "无校验和文件"
           cp "$OPENWRT_PATH/.config" build.config
           tar -zcf Packages.tar.gz packages
